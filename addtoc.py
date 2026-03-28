@@ -223,6 +223,7 @@ class TocEntry:
             prev_level = level
         return issues
 
+    # NOTE: this function is not used now. maybe provide a mode to use this in the future.
     @staticmethod
     def _outline_levels_from_font_sizes(entries: List["TocEntry"]) -> List[int]:
         """
@@ -235,6 +236,21 @@ class TocEntry:
         unique_desc = sorted(set(rounded), reverse=True)
         tier_of = {s: i for i, s in enumerate(unique_desc)}
         return [tier_of[r] + 1 for r in rounded]
+
+    # TODO: we could instead just remove all the dangling levels. maybe provide
+    # this mode in the future.
+
+    @staticmethod
+    def _outline_compact_levels(entries: List["TocEntry"]) -> List[int]:
+        """
+        Compact the levels of the entries into a single list of levels.
+        """
+        if not entries:
+            return []
+        levels = sorted(set(entry.level for entry in entries))
+        level_map = {level: i + 1 for i, level in enumerate(levels)}
+        return [level_map[entry.level] for entry in entries]
+
 
     @staticmethod
     def _repair_outline_levels(raw: List[int]) -> List[int]:
@@ -266,7 +282,8 @@ class TocEntry:
         items = list(entries)
         if not items:
             return [], []
-        raw = cls._outline_levels_from_font_sizes(items)
+        raw = cls._outline_compact_levels(items)
+        # raw = cls._outline_levels_from_font_sizes(items)
         new_levels = cls._repair_outline_levels(raw)
         adjusted_entries: List[TocEntry] = []
         adjustments: List[LevelAdjustment] = []
@@ -424,6 +441,10 @@ def collect_spans(input_path) -> List[SpanRecord]:
                         )
     finally:
         doc.close()
+
+    # assume single column pages for now.
+    records.sort(key=lambda r: (r.page, r.y, r.x, r.order))
+    # TODO: For multi column pages, we need to sort the records by page, rounded(x), y, and order.
 
     return records
 
