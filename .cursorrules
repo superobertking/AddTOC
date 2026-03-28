@@ -1,0 +1,45 @@
+# Project: AddTOC (PDF Heuristic & Structure Engine)
+
+## 1. Project Overview & Intent
+AddTOC is a specialized tool designed to solve the "Flat PDF" problem. Standard PDFs are graphical databases lacking semantic hierarchy (H1, H2, TOC). This project reconstructs that hierarchy by performing heuristic analysis on the internal graphics state and font metadata, then injecting a functional `/Outlines` dictionary (Table of Contents) back into the file.
+
+## 2. Technical Context for AI
+- **PDF Anatomy:** Always respect the four-part structure: Header, Body (Objects), Cross-Reference Table (XRef), and Trailer.
+- **Coordinate System:** Standard PDF coordinates (User Unit) start from the **bottom-left (0,0)**. A standard Letter page is 612x792 points.
+- **PyMuPDF `get_text("dict")` span geometry (critical for bookmarks):** Span `bbox` y behaves like **top-left origin, y increases downward** (larger y = lower on the page). The **top** of a heading line is **`min(bbox[1], bbox[3])`**, not `max`. In this space **adding** to y moves **down**; a “top margin” for the bookmark is **`y_top - margin_pt`**, not `+ margin`. Do **not** assume classic PDF “y up” for span bbox when wiring outline `to` coordinates.
+- **Text Representation:** Text exists as "spans" within a content stream. Each span contains metadata: `size` (font size), `font` (name/style), and `origin` (x, y).
+- **The "Root":** The Document Catalog (Root) must contain the `/Outlines` key for a TOC to be visible in readers.
+
+## 3. Tech Stack & Dependencies
+- **Primary Library:** `PyMuPDF` (must be imported as `import fitz`).
+- **Data Handling:** `NumPy` (for clustering coordinates or analyzing font size distributions).
+- **Environment:** Python 3.10+.
+
+## 4. Heuristic Logic & Rules
+Use adaptive heuristics, not fixed thresholds:
+- **Body Font Estimation:** Determine dominant body size statistically (weighted by text length).
+- **Heading Thresholds:** Auto-calculate descending thresholds from font-size distribution, with grouping/merging of near-identical sizes.
+- **Hierarchy Refinement:** Use x-origin indentation clustering to split same-size headings into deeper levels.
+- **Relaxation Controls:** Treat `bold`, `italics`, and non-default `color` as optional relaxations that users toggle interactively.
+- **Filtering Stage:** Apply whitelist rules first, then blacklist rules.
+- **Preset Regex:** Deep numbering preset should allow `1`, `1.`, `1.1`, `1.1.` up to 7 numeric layers.
+- **Extraction Method:** Always use `page.get_text("dict")` to access span metadata; avoid `get_text("text")`.
+
+## 5. Coding Standards & Constraints
+- **Library Choice:** Prioritize `PyMuPDF` (`fitz`) for all PDF operations. Do not use `pypdf`, `pdfminer`, or `fpdf` unless explicitly requested for side-by-side comparison.
+- **Naming Conventions:**
+    - `find_*`: Functions that scan and analyze text/metadata (e.g., `find_headers`).
+    - `inject_*`: Functions that modify the PDF structure (e.g., `inject_toc`).
+    - `get_*`: Functions that retrieve existing properties without logic.
+- **Memory Efficiency:** PDFs can be massive. Use generators to process pages and close document handles (`doc.close()`) as soon as writing is finished.
+- **Safety:** Do not overwrite the `/Outlines` of a file that already has a structured TOC unless the `--force` flag logic is implemented.
+- **Interactive UX Safety:** Support resilient CLI interaction:
+    - `Ctrl-C` clears active input and reprompts.
+    - `Ctrl-D` exits interactive mode gracefully.
+    - Save failures should return users to interactive tuning, not terminate abruptly.
+
+## 6. Implementation Patterns
+- To create a TOC, build a list of lists: `[[level, title, page_number], ...]` and apply it using `doc.set_toc(toc_list)`.
+- When searching for headers, always `.strip()` text and ignore spans with a length of 1 (likely noise or icons) to prevent "False Positive" bookmarks.
+- Keep preview lines at max 80 chars and include aligned metadata prefix format: `[size BIU]`.
+- Maintain numbered preview entries so `block <n>` can convert to exact blacklist filters.
