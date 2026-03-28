@@ -7,6 +7,7 @@ from pathlib import Path
 from addtoc import (
     TOC_DEST_TOP_MARGIN_PT,
     FilterRule,
+    LevelAdjustment,
     Relaxations,
     SpanRecord,
     TocEntry,
@@ -19,6 +20,7 @@ from addtoc import (
     parse_thresholds,
     realign_toc_entries_for_save,
     render_toc_preview,
+    render_toc_realign_preview,
     validate_toc_hierarchy,
 )
 
@@ -69,8 +71,8 @@ class TestAddToc(unittest.TestCase):
         preview = render_toc_preview(toc_entries, width=45)
         lines = preview.splitlines()
 
-        self.assertEqual(lines[0], "  1. [20.0 B  ] L1 - Top Level Title (p. 1)")
-        self.assertTrue(lines[1].startswith("  2. [16.2  IU] L2   - "))
+        self.assertEqual(lines[0], "  1. [20.0 B  ] L1 * Top Level Title (p. 1)")
+        self.assertTrue(lines[1].startswith("  2. [16.2  IU] L2   * "))
         self.assertLessEqual(len(lines[1]), 45)
         self.assertTrue(lines[1].endswith("..."))
 
@@ -297,7 +299,36 @@ class TestAddToc(unittest.TestCase):
         ]
         aligned, adjustments = realign_toc_entries_for_save(entries)
         self.assertEqual([e.level for e in aligned], [1, 2, 3, 4])
-        self.assertEqual([(a.row, a.from_level, a.to_level) for a in adjustments], [(1, 3, 1), (2, 5, 2), (3, 2, 3), (4, 6, 4)])
+        self.assertEqual(
+            [(a.row, a.from_level, a.to_level) for a in adjustments],
+            [(1, 3, 1), (2, 5, 2), (3, 2, 3), (4, 6, 4)],
+        )
+
+    def test_render_toc_realign_preview_marks_cut_levels_with_arrow(self):
+        """Cut: one ``<`` plus one hyphen per level dropped, between ``*`` and title."""
+        entries = [
+            TocEntry(3, "A", 1, 20.0, 72.0, 36.0, "B  ", 3, ""),
+            TocEntry(5, "B", 1, 16.0, 72.0, 36.0, "   ", 5, ""),
+            TocEntry(2, "C", 1, 14.0, 72.0, 36.0, "   ", 2, ""),
+            TocEntry(6, "D", 2, 12.0, 72.0, 36.0, "   ", 6, ""),
+        ]
+        aligned, adjs = realign_toc_entries_for_save(entries)
+        preview = render_toc_realign_preview(aligned, adjs, width=120)
+        lines = preview.splitlines()
+        # Outline indent is 2 spaces per level after L1; markers sit next to * as documented.
+        self.assertIn("* <-- A", lines[0])
+        self.assertIn("* <--- B", lines[1])
+        self.assertIn("L3", lines[2])
+        self.assertIn("-> * C", lines[2])
+        self.assertIn("* <-- D", lines[3])
+
+    def test_render_toc_realign_preview_deepen_marker_before_star(self):
+        """Deepen: (gain+1) hyphens then ``>`` immediately before ``*`` (realign rarely deepens)."""
+        entry = TocEntry(3, "Deep", 1, 12.0, 72.0, 36.0, "   ", 3, "")
+        adjs = [LevelAdjustment(row=1, from_level=1, to_level=3, title="Deep")]
+        preview = render_toc_realign_preview([entry], adjs, width=120)
+        self.assertIn("L3", preview)
+        self.assertIn("---> * Deep", preview)
 
     def test_realign_keeps_consecutive_same_font_at_same_outline_level(self):
         """Same font size in a row maps to the same tier; repair keeps consecutive equals aligned."""

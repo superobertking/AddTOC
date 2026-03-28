@@ -41,5 +41,5 @@ Use adaptive heuristics, not fixed thresholds:
 ## 6. Implementation Patterns
 - To create a TOC, build a list of lists: `[[level, title, page_number], ...]` and apply it using `doc.set_toc(toc_list)`.
 - When searching for headers, always `.strip()` text and ignore spans with a length of 1 (likely noise or icons) to prevent "False Positive" bookmarks.
-- Keep preview lines at max 80 chars and include aligned metadata prefix format: `[size BIU]`.
+- Keep preview lines at max 80 chars and include aligned metadata prefix format: `[size BIU]`, then `L<n>` and a `*` bullet before the title.
 - Maintain numbered preview entries so `block <n>` can convert to exact blacklist filters.

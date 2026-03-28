@@ -44,10 +44,11 @@ Behavior:
   - Example: `[15.4 B  ]` (bold), `[10.3  IU]` (italic + underline).
 - Shows explicit hierarchy labels on every line (`L1`, `L2`, ...).
 - Numbers each preview entry for interactive blocking.
-- Shows one entry per line with hierarchy indentation.
+- Shows one entry per line with hierarchy indentation (each line uses a `*` bullet after the `L<n>` label).
 - Truncates each preview line to 80 characters.
+- Uses ANSI colors on interactive CLI output when stdout is a terminal; set `NO_COLOR` to disable.
 - Lets you iteratively adjust thresholds, relax rules, and apply filters until preview looks right.
-- If hierarchy gaps are detected at save time, auto-realigns by rebuilding levels from font-size tiers (largest size = shallowest), then enforcing valid outline steps (consecutive equal tiers stay siblings); shows a warning and the adjusted preview, then asks for acceptance (`--yes` auto-accepts this safety step).
+- If hierarchy gaps are detected at save time, auto-realigns by rebuilding levels from font-size tiers (largest size = shallowest), **never deepening** vs the preview heuristic, then enforcing valid outline steps; shows a warning and the adjusted preview: a **cut** uses one leading `<` whose hyphen run lengthens with how many levels were removed; a **deepen** (if ever shown) uses a lengthening `--…>` run immediately before the `*`. The `*` stays at the new outline indent.
 - Asks for confirmation before writing (unless `--yes` is used).
 - Saved bookmarks target each heading's exact span origin (`x`,`y`) instead of page top.
 - If saving fails, it returns to interactive mode so you can fix and retry.

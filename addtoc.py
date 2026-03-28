@@ -4,8 +4,10 @@
 # Vibe coded with Gemini and Cursor
 
 import argparse
+import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -17,6 +19,62 @@ import numpy as np
 # Top of the heading is min(y0, y1). In that space, *adding* y moves *down*, so +margin
 # would land below the title top—wrong. Use y_top - margin to nudge slightly *up*.
 TOC_DEST_TOP_MARGIN_PT = 3.0
+
+
+class TerminalColors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    FG_CYAN = "\033[36m"
+    FG_YELLOW = "\033[33m"
+    FG_GREEN = "\033[32m"
+    FG_RED = "\033[31m"
+    FG_BLUE = "\033[34m"
+
+def _terminal_color_enabled() -> bool:
+    if os.environ.get("NO_COLOR", "").strip():
+        return False
+    if os.environ.get("TERM", "") == "dumb":
+        return False
+    try:
+        return sys.stdout.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+def _style(text: str, *sgr: str) -> str:
+    if not text or not _terminal_color_enabled():
+        return text
+    return "".join(sgr) + text + TerminalColors.RESET
+
+def _make_styler(*sgr: str):
+    def styler(text: str) -> str:
+        return _style(text, *sgr)
+    return styler
+
+_hdr  = _make_styler(TerminalColors.BOLD, TerminalColors.FG_CYAN)
+_cmd  = _make_styler(TerminalColors.FG_YELLOW)
+_dim  = _make_styler(TerminalColors.DIM)
+_ok   = _make_styler(TerminalColors.FG_GREEN)
+_warn = _make_styler(TerminalColors.BOLD, TerminalColors.FG_YELLOW)
+_err  = _make_styler(TerminalColors.BOLD, TerminalColors.FG_RED)
+_lbl  = _make_styler(TerminalColors.BOLD, TerminalColors.FG_BLUE)
+_info = _make_styler(TerminalColors.FG_CYAN)
+
+def lbl(msg: str) -> None: print(_lbl(msg))
+def hdr(msg: str) -> None: print(_hdr(msg))
+def dim(msg: str) -> None: print(_dim(msg))
+def ok(msg: str) -> None: print(_ok(msg))
+def warn(msg: str) -> None: print(_warn(msg))
+def err(msg: str) -> None: print(_err(msg))
+def info(msg: str) -> None: print(_info(msg))
+
+
+def _print_help_row(cmd: str, desc: str, width: int) -> None:
+    if _terminal_color_enabled():
+        pad = max(0, width - len(cmd) + 2)
+        print(f"  {_cmd(cmd)}{' ' * pad}{_dim(desc)}")
+    else:
+        print(f"  {cmd:<{width}}  {desc}")
 
 
 def _bookmark_y_from_span(span: dict) -> float:
@@ -117,7 +175,7 @@ class TocEntry:
     level_reason: str
 
     def preview_line(self, width: int = 80, index: Optional[int] = None) -> str:
-        prefix = f'{"  " * (self.level - 1)}- '
+        prefix = f'{"  " * (self.level - 1)}* '
         line = f"[{self.size:>4.1f} {self.style}] L{self.level} {prefix}{self.title} (p. {self.page})"
         if index is not None:
             line = f"{index:>3}. {line}"
@@ -230,12 +288,15 @@ class TocEntry:
     @classmethod
     def print_diagnostics(cls, entries: List["TocEntry"], max_rows: int = 20) -> None:
         items = list(entries)
-        print("Heuristic hierarchy assignment (row, level, reason):")
+        hdr("Heuristic hierarchy assignment (row, level, reason):")
         for idx, entry in enumerate(items[:max_rows], start=1):
             reason = entry.level_reason or "n/a"
-            print(f"  row {idx:>3}: L{entry.level} | {reason} | {entry.title} (p. {entry.page})")
+            print(
+                f"  {_dim(f'row {idx:>3}:')} {_info(f'L{entry.level}')} {_dim('|')} "
+                f"{reason} {_dim('|')} {entry.title} (p. {entry.page})"
+            )
         if len(items) > max_rows:
-            print(f"  ... {len(items) - max_rows} more rows omitted")
+            dim(f"  ... {len(items) - max_rows} more rows omitted")
 
 
 @dataclass
@@ -510,6 +571,58 @@ def render_toc_preview(toc_entries: List[TocEntry], width=80) -> str:
     return TocEntry.render_preview(toc_entries, width)
 
 
+def _toc_realign_preview_line(
+    entry: TocEntry,
+    adj: Optional[LevelAdjustment],
+    width: int,
+    index: int,
+) -> str:
+    """
+    One preview line like render_toc_preview, with optional realign markers:
+    - Level cut (shallower): ``<`` then one hyphen per level dropped, between ``*`` and title.
+    - Level deepen: (gain + 1) hyphens, ``>``, space, then ``*`` (at the new indent).
+    """
+    level = entry.level
+    indent = "  " * (level - 1)
+    if adj is None:
+        star_segment = f"{indent}* "
+        between = ""
+    elif adj.to_level > adj.from_level:
+        gain = adj.to_level - adj.from_level
+        arrow = "-" * (gain * 2 - 2) + ">"
+        star_segment = f"{indent}{arrow} * "
+        between = ""
+    else:
+        drops = adj.from_level - adj.to_level
+        cut = "<" + "-" * (drops * 2 - 2)
+        star_segment = f"{indent}* "
+        between = f"{cut} "
+
+    line = (
+        f"[{entry.size:>4.1f} {entry.style}] L{level} {star_segment}{between}"
+        f"{entry.title} (p. {entry.page})"
+    )
+    line = f"{index:>3}. {line}"
+    if len(line) <= width:
+        return line
+    if width <= 3:
+        return "." * width
+    return f"{line[: width - 3]}..."
+
+
+def render_toc_realign_preview(
+    toc_entries: List[TocEntry],
+    adjustments: List[LevelAdjustment],
+    width: int = 80,
+) -> str:
+    """Like ``render_toc_preview`` but annotates rows that ``realign_toc_entries_for_save`` changed."""
+    by_row = {a.row: a for a in adjustments}
+    return "\n".join(
+        _toc_realign_preview_line(entry, by_row.get(idx), width, idx)
+        for idx, entry in enumerate(toc_entries, start=1)
+    )
+
+
 def validate_toc_hierarchy(entries: List[TocEntry]) -> List[HierarchyIssue]:
     """Validate TOC levels for PyMuPDF compatibility."""
     return TocEntry.validate_hierarchy(entries)
@@ -535,7 +648,7 @@ def dump_font_groups(records: List[SpanRecord]):
     """Print quick diagnostics for size/style/indent groups."""
     spans = list(records)
     if not spans:
-        print("No spans found.")
+        warn("No spans found.")
         return
 
     grouped = {}
@@ -543,9 +656,9 @@ def dump_font_groups(records: List[SpanRecord]):
         key = (round(rec.size, 2), "bold" if rec.is_bold_font() else "regular", round(rec.x, 1))
         grouped[key] = grouped.get(key, 0) + 1
 
-    print("Font group dump (size, weight, x -> count):")
+    hdr("Font group dump (size, weight, x -> count):")
     for (size, weight, x), count in sorted(grouped.items(), key=lambda i: (-i[0][0], i[0][2], i[0][1])):
-        print(f"  {size:>5.2f}, {weight:<7}, x={x:>6.1f} -> {count}")
+        dim(f"  {size:>5.2f}, {weight:<7}, x={x:>6.1f} -> {count}")
 
 
 def build_toc_for_save(entries: List[TocEntry]) -> List[TocSaveItem]:
@@ -597,23 +710,28 @@ def make_filter(next_filter_id, action, mode, pattern, preset: Optional[str] = N
 
 
 def print_interactive_help():
-    print("\nInteractive commands:")
-    print("  ok                                  Accept current preview")
-    print("  thresholds <csv>                    Set thresholds (descending)")
-    print("  relax|more <bold|italics|color>...   Relax selected rules (more = same)")
-    print("  unrelax|less <bold|italics|color>... Tighten (less = same)")
-    print("  revert                              Revert last relax/tighten change")
-    print("  relax list | more list              Show current relaxations")
-    print("  filter list                         List filters")
-    print("  filter add <+|-> <exact|regex> <pattern>")
-    print("  filter update <id> <+|-> <exact|regex> <pattern>")
-    print("  filter del <id>                     Delete a filter")
-    print("  preset list                         List built-in presets")
-    print("  preset use [<name>]                 Apply preset by name, or choose at a prompt")
-    print("  block <entry_number>                Blacklist exact title from preview")
-    print("  show                                Print current preview now")
-    print("  why <entry_number>                  Show assigned level reason for one entry")
-    print("  help                                Show command help")
+    rows = [
+        ("ok", "Accept current preview"),
+        ("thresholds <csv>", "Set thresholds (descending)"),
+        ("relax|more <bold|italics|color>...", "Relax selected rules (more = same)"),
+        ("unrelax|less <bold|italics|color>...", "Tighten (less = same)"),
+        ("revert", "Revert last relax/tighten change"),
+        ("relax list | more list", "Show current relaxations"),
+        ("filter list", "List filters"),
+        ("filter add <+|-> <exact|regex> <pattern>", ""),
+        ("filter update <id> <+|-> <exact|regex> <pattern>", ""),
+        ("filter del <id>", "Delete a filter"),
+        ("preset list", "List built-in presets"),
+        ("preset use [<name>]", "Apply preset by name, or choose at a prompt"),
+        ("block <entry_number>", "Blacklist exact title from preview"),
+        ("show", "Print current preview now"),
+        ("why <entry_number>", "Show assigned level reason for one entry"),
+        ("help", "Show command help"),
+    ]
+    w = max(len(cmd) for cmd, _ in rows)
+    hdr("\nInteractive commands:")
+    for cmd, desc in rows:
+        _print_help_row(cmd, desc, w)
 
 
 def read_command_input(prompt):
@@ -624,12 +742,12 @@ def read_command_input(prompt):
     """
     while True:
         try:
-            return input(prompt).strip()
+            return input(_lbl(prompt)).strip()
         except KeyboardInterrupt:
-            print("\nCommand cleared. Type a new command.")
+            warn("\nCommand cleared. Type a new command.")
             continue
         except EOFError:
-            print("\nExiting interactive mode.")
+            dim("\nExiting interactive mode.")
             return None
 
 
@@ -641,9 +759,9 @@ def read_prompt_input(prompt):
     """
     while True:
         try:
-            return input(prompt).strip()
+            return input(_lbl(prompt)).strip()
         except KeyboardInterrupt:
-            print("\nInput cleared.")
+            warn("\nInput cleared.")
             continue
         except EOFError:
             print()
@@ -688,7 +806,7 @@ class CommandHandler:
             try:
                 parts = shlex.split(raw)
             except ValueError as exc:
-                print(f"Invalid command: {exc}")
+                err(f"Invalid command: {exc}")
                 continue
             if not parts:
                 continue
@@ -701,17 +819,16 @@ class CommandHandler:
         self.toc_entries = build_toc_entries(self.records, self.thresholds, self.relaxations, self.filters)
 
     def _print_state(self):
-        print("\nAuto/Current thresholds:", ", ".join(f"{v:.1f}" for v in self.thresholds) or "(none)")
-        print(
-            "Relaxations:",
-            ", ".join(f"{name}={'on' if enabled else 'off'}" for name, enabled in self._relax_items()),
-        )
-        print("Detected TOC preview:")
+        thr = ", ".join(f"{v:.1f}" for v in self.thresholds) or "(none)"
+        print(f"\n{_lbl('Auto/Current thresholds:')} {_info(thr)}")
+        rel = ", ".join(f"{name}={'on' if enabled else 'off'}" for name, enabled in self._relax_items())
+        print(f"{_lbl('Relaxations:')} {_info(rel)}")
+        lbl("Detected TOC preview:")
         if self.toc_entries:
             print(render_toc_preview(self.toc_entries, width=80))
         else:
-            print("(No entries detected for current settings.)")
-        print(f"\nDetected {len(self.toc_entries)} potential TOC entries.")
+            dim("(No entries detected for current settings.)")
+        info(f"\nDetected {len(self.toc_entries)} potential TOC entries.")
 
     def _relax_items(self) -> List[Tuple[str, bool]]:
         r = self.relaxations
@@ -743,35 +860,38 @@ class CommandHandler:
         elif cmd == "block":
             self._cmd_block(parts)
         else:
-            print("Unknown command. Type 'help' for available commands.")
+            warn("Unknown command. Type 'help' for available commands.")
 
         return False  # Continue interactive mode
 
     def _cmd_why(self, parts: List[str]):
         if len(parts) != 2:
-            print("Usage: why <entry_number>")
+            err("Usage: why <entry_number>")
             return
         try:
             idx = int(parts[1]) - 1
         except ValueError:
-            print("Entry number must be an integer.")
+            err("Entry number must be an integer.")
             return
         if idx < 0 or idx >= len(self.toc_entries):
-            print("Entry number out of range.")
+            err("Entry number out of range.")
             return
         entry = self.toc_entries[idx]
         reason = entry.level_reason or "n/a"
-        print(f"row {idx + 1}: L{entry.level} | {reason} | {entry.title} (p. {entry.page})")
+        print(
+            f"{_dim(f'row {idx + 1}:')} {_info(f'L{entry.level}')} {_dim('|')} "
+            f"{reason} {_dim('|')} {entry.title} (p. {entry.page})"
+        )
 
     def _cmd_thresholds(self, parts: List[str]):
         if len(parts) < 2:
-            print("Usage: thresholds 20.0,16.0,14.5")
+            err("Usage: thresholds 20.0,16.0,14.5")
             return
         try:
             self.thresholds = parse_thresholds(parts[1])
             self.needs_refresh = True
         except ValueError as exc:
-            print(f"Invalid thresholds: {exc}")
+            err(f"Invalid thresholds: {exc}")
 
     def _cmd_relax(self, parts: List[str]):
         raw_cmd = parts[0].lower()
@@ -782,21 +902,21 @@ class CommandHandler:
         else:
             cmd = raw_cmd
         if len(parts) == 2 and parts[1] == "list":
-            print(
-                "Relaxations:",
-                ", ".join(f"{name}={'on' if enabled else 'off'}" for name, enabled in self._relax_items()),
-            )
+            rel = ", ".join(f"{name}={'on' if enabled else 'off'}" for name, enabled in self._relax_items())
+            print(f"{_lbl('Relaxations:')} {_info(rel)}")
             return
         if len(parts) < 2:
             print(
-                f"Usage: {raw_cmd} <bold|italics|color>... or '{raw_cmd} list' "
-                f"(relax|more / unrelax|less)"
+                _err(
+                    f"Usage: {raw_cmd} <bold|italics|color>... or '{raw_cmd} list' "
+                    f"(relax|more / unrelax|less)"
+                )
             )
             return
         attrs = set(parts[1:])
         valid = {"bold", "italics", "color"}
         if not attrs.issubset(valid):
-            print("Only bold, italics, color are supported.")
+            err("Only bold, italics, color are supported.")
             return
         self.relax_stack.append(
             Relaxations(bold=self.relaxations.bold, italics=self.relaxations.italics, color=self.relaxations.color)
@@ -812,14 +932,14 @@ class CommandHandler:
 
     def _cmd_revert(self):
         if not self.relax_stack:
-            print("No relaxation history to revert.")
+            warn("No relaxation history to revert.")
             return
         self.relaxations = self.relax_stack.pop()
         self.needs_refresh = True
 
     def _apply_preset(self, name: str) -> None:
         if name not in self.preset_registry:
-            print(f"Unknown preset. Supported: {', '.join(sorted(self.preset_registry))}")
+            err(f"Unknown preset. Supported: {', '.join(sorted(self.preset_registry))}")
             return
         try:
             rule = make_filter(
@@ -832,9 +952,9 @@ class CommandHandler:
             self.filters.append(rule)
             self.next_filter_id += 1
             self.needs_refresh = True
-            print(f"Applied preset {name} whitelist filter.")
+            ok(f"Applied preset {name} whitelist filter.")
         except ValueError as exc:
-            print(f"Failed to apply preset: {exc}")
+            err(f"Failed to apply preset: {exc}")
 
     def _resolve_preset_choice(self, raw: str) -> Optional[str]:
         """Map user input (1-based index or preset name) to a registry key."""
@@ -855,26 +975,26 @@ class CommandHandler:
     def _interactive_preset_use(self) -> None:
         names = sorted(self.preset_registry.keys())
         if not names:
-            print("No presets available.")
+            warn("No presets available.")
             return
-        print("Choose a preset (enter number or name):")
+        lbl("Choose a preset (enter number or name):")
         for i, name in enumerate(names, start=1):
-            print(f"  {i}. {name}")
-            print(f"      {self.preset_registry[name]}")
+            print(f"  {_cmd(str(i))}. {_info(name)}")
+            dim(f"      {self.preset_registry[name]}")
         choice = read_prompt_input("Preset number or name: ")
         if choice is None:
             return
         resolved = self._resolve_preset_choice(choice)
         if not resolved:
-            print("Unknown preset.")
+            err("Unknown preset.")
             return
         self._apply_preset(resolved)
 
     def _cmd_preset(self, parts: List[str]):
         if len(parts) == 2 and parts[1].lower() == "list":
-            print("Available presets:")
+            hdr("Available presets:")
             for name, pattern in self.preset_registry.items():
-                print(f"  {name}: {pattern}")
+                print(f"  {_cmd(name)}: {_dim(pattern)}")
             return
         if len(parts) >= 2 and parts[1].lower() == "use":
             if len(parts) == 2:
@@ -883,21 +1003,21 @@ class CommandHandler:
             name = "-".join(p.lower() for p in parts[2:])
             self._apply_preset(name)
             return
-        print("Usage: preset list | preset use [<name>]")
+        err("Usage: preset list | preset use [<name>]")
 
     def _cmd_filter(self, parts: List[str]):
         if len(parts) < 2:
-            print("Usage: filter list|add|update|del ...")
+            err("Usage: filter list|add|update|del ...")
             return
         sub = parts[1].lower()
         if sub == "list":
             if not self.filters:
-                print("No filters configured.")
+                dim("No filters configured.")
                 return
-            print("Filters:")
+            hdr("Filters:")
             for f in self.filters:
-                preset_hint = f" (preset:{f.preset})" if f.preset else ""
-                print(f"  #{f.id}: {f.action} {f.mode} {f.pattern}{preset_hint}")
+                preset_hint = _dim(f" (preset:{f.preset})") if f.preset else ""
+                print(f"  {_info(f'#{f.id}')}: {_cmd(f.action)} {f.mode} {f.pattern}{preset_hint}")
             return
         if sub == "add" and len(parts) >= 5:
             action, mode = parts[2], parts[3]
@@ -907,62 +1027,62 @@ class CommandHandler:
                 self.next_filter_id += 1
                 self.needs_refresh = True
             except ValueError as exc:
-                print(f"Invalid filter: {exc}")
+                err(f"Invalid filter: {exc}")
             return
         if sub == "update" and len(parts) >= 6:
             try:
                 filter_id = int(parts[2])
             except ValueError:
-                print("Filter id must be an integer.")
+                err("Filter id must be an integer.")
                 return
             action, mode = parts[3], parts[4]
             pattern = " ".join(parts[5:])
             idx = next((i for i, f in enumerate(self.filters) if f.id == filter_id), None)
             if idx is None:
-                print(f"Filter #{filter_id} not found.")
+                err(f"Filter #{filter_id} not found.")
                 return
             try:
                 updated = make_filter(filter_id, action, mode, pattern)
                 self.filters[idx] = updated
                 self.needs_refresh = True
             except ValueError as exc:
-                print(f"Invalid filter: {exc}")
+                err(f"Invalid filter: {exc}")
             return
         if sub == "del" and len(parts) == 3:
             try:
                 filter_id = int(parts[2])
             except ValueError:
-                print("Filter id must be an integer.")
+                err("Filter id must be an integer.")
                 return
             before = len(self.filters)
             self.filters = [f for f in self.filters if f.id != filter_id]
             if len(self.filters) == before:
-                print(f"Filter #{filter_id} not found.")
+                err(f"Filter #{filter_id} not found.")
             else:
                 self.needs_refresh = True
             return
-        print("Usage: filter add|update|del|list ...")
+        err("Usage: filter add|update|del|list ...")
 
     def _cmd_block(self, parts: List[str]):
         if len(parts) != 2:
-            print("Usage: block <entry_number>")
+            err("Usage: block <entry_number>")
             return
         try:
             idx = int(parts[1]) - 1
         except ValueError:
-            print("Entry number must be an integer.")
+            err("Entry number must be an integer.")
             return
         if idx < 0 or idx >= len(self.toc_entries):
-            print("Entry number out of range.")
+            err("Entry number out of range.")
             return
         title = self.toc_entries[idx].title
         try:
             self.filters.append(make_filter(self.next_filter_id, "-", "exact", title))
             self.next_filter_id += 1
             self.needs_refresh = True
-            print(f"Blocked exact title: {title}")
+            ok(f"Blocked exact title: {title}")
         except ValueError as exc:
-            print(f"Could not block entry: {exc}")
+            err(f"Could not block entry: {exc}")
 
 
 def interactive_threshold_selection(
@@ -1030,30 +1150,31 @@ def main():
         dump_font_groups(records)
     auto_thresholds = SpanRecord.auto_calculate_thresholds(records)
     if not auto_thresholds:
-        print("No heading-like font groups found above body text.")
+        warn("No heading-like font groups found above body text.")
         return 1
 
     if args.thresholds:
         try:
             current_thresholds = parse_thresholds(args.thresholds)
         except ValueError as exc:
-            print(f"Invalid --thresholds value: {exc}")
+            err(f"Invalid --thresholds value: {exc}")
             return 1
     else:
         current_thresholds = auto_thresholds
 
-    print("Auto-calculated thresholds:", ", ".join(f"{v:.1f}" for v in auto_thresholds))
+    thr_line = ", ".join(f"{v:.1f}" for v in auto_thresholds)
+    print(f"{_lbl('Auto-calculated thresholds:')} {_info(thr_line)}")
 
     if args.yes:
         accepted_thresholds = current_thresholds
         toc_entries = build_toc_entries(records, accepted_thresholds)
-        print("Detected TOC preview:")
+        lbl("Detected TOC preview:")
         print(render_toc_preview(toc_entries, width=80))
-        print(f"\nDetected {len(toc_entries)} potential TOC entries.")
+        info(f"\nDetected {len(toc_entries)} potential TOC entries.")
     else:
         accepted_thresholds, toc_entries = interactive_threshold_selection(records, current_thresholds)
         if accepted_thresholds is None:
-            print("Cancelled. No output PDF written.")
+            dim("Cancelled. No output PDF written.")
             return 0
 
     if args.preview_only:
@@ -1061,28 +1182,31 @@ def main():
 
     while True:
         if not toc_entries:
-            print("No headers detected with current thresholds.")
+            warn("No headers detected with current thresholds.")
             return 1
 
         entries_to_save = toc_entries
         hierarchy_issues = validate_toc_hierarchy(toc_entries)
         if hierarchy_issues:
             realigned_entries, adjustments = realign_toc_entries_for_save(toc_entries)
-            print("Warning: hierarchy gaps detected at save time; auto-realigned levels:")
+            warn("Warning: hierarchy gaps detected at save time; auto-realigned levels:")
             for adj in adjustments[:10]:
-                print(f"  row {adj.row}: L{adj.from_level} -> L{adj.to_level} | {adj.title}")
+                print(
+                    f"  {_dim(f'row {adj.row}:')} {_info(f'L{adj.from_level}')} {_dim('->')} "
+                    f"{_info(f'L{adj.to_level}')} {_dim('|')} {adj.title}"
+                )
             if len(adjustments) > 10:
-                print(f"  ... {len(adjustments) - 10} more rows adjusted")
-            print("Auto-realigned TOC preview:")
-            print(render_toc_preview(realigned_entries, width=80))
+                dim(f"  ... {len(adjustments) - 10} more rows adjusted")
+            lbl("Auto-realigned TOC preview:")
+            print(render_toc_realign_preview(realigned_entries, adjustments, width=80))
 
             if args.yes:
-                print("Auto-accepting realigned TOC because --yes was provided.")
+                info("Auto-accepting realigned TOC because --yes was provided.")
                 entries_to_save = realigned_entries
             else:
                 accept_aligned = read_prompt_input("Accept auto-realigned TOC for save? [y/N]: ")
                 if accept_aligned is None or accept_aligned.lower() not in {"y", "yes"}:
-                    print("Returning to interactive mode to adjust settings before retry.")
+                    warn("Returning to interactive mode to adjust settings before retry.")
                     accepted_thresholds, toc_entries = interactive_threshold_selection(
                         records,
                         accepted_thresholds,
@@ -1090,29 +1214,29 @@ def main():
                         show_initial_preview=False,
                     )
                     if accepted_thresholds is None:
-                        print("Cancelled. No output PDF written.")
+                        dim("Cancelled. No output PDF written.")
                         return 1
                     args.yes = False
                     continue
                 entries_to_save = realigned_entries
 
         toc = build_toc_for_save(entries_to_save)
-        print("Accepted thresholds:", ", ".join(f"{v:.1f}" for v in accepted_thresholds))
+        print(f"{_lbl('Accepted thresholds:')} {_info(', '.join(f'{v:.1f}' for v in accepted_thresholds))}")
         if not args.output_pdf:
-            print(f"No output path provided; using default output path: {output_path}")
+            info(f"No output path provided; using default output path: {output_path}")
         answer = "y" if args.yes else read_prompt_input("Save this TOC to the output PDF? [y/N]: ")
         if answer is None or answer.lower() not in {"y", "yes"}:
-            print("Cancelled. No output PDF written.")
+            dim("Cancelled. No output PDF written.")
             return 0
 
         try:
             inject_toc(str(input_path), str(output_path), toc, force=args.force)
-            print(f"Saved output PDF with TOC: {output_path}")
+            ok(f"Saved output PDF with TOC: {output_path}")
             return 0
         except Exception as exc:
-            print(f"Save failed: {exc}")
+            err(f"Save failed: {exc}")
             print_hierarchy_diagnostics(toc_entries, max_rows=25)
-            print("Returning to interactive mode to adjust settings before retry.")
+            warn("Returning to interactive mode to adjust settings before retry.")
             accepted_thresholds, toc_entries = interactive_threshold_selection(
                 records,
                 accepted_thresholds,
@@ -1120,7 +1244,7 @@ def main():
                 show_initial_preview=False,
             )
             if accepted_thresholds is None:
-                print("Cancelled. No output PDF written.")
+                dim("Cancelled. No output PDF written.")
                 return 1
             args.yes = False
 
